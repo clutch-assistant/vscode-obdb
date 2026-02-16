@@ -1,15 +1,5 @@
 import * as jsonc from 'jsonc-parser';
 
-// Minimal vscode compatibility types for CLI use
-namespace vscode {
-  export enum DiagnosticSeverity {
-    Error = 0,
-    Warning = 1,
-    Information = 2,
-    Hint = 3
-  }
-}
-
 /**
  * Interface for a signal object in the JSON
  */
@@ -71,24 +61,6 @@ export enum LintSeverity {
   Warning = 'warning',
   Information = 'information',
   Hint = 'hint'
-}
-
-/**
- * Maps severity levels to VS Code diagnostic severity
- */
-export function getSeverity(severity: LintSeverity): vscode.DiagnosticSeverity {
-  switch (severity) {
-    case LintSeverity.Error:
-      return vscode.DiagnosticSeverity.Error;
-    case LintSeverity.Warning:
-      return vscode.DiagnosticSeverity.Warning;
-    case LintSeverity.Information:
-      return vscode.DiagnosticSeverity.Information;
-    case LintSeverity.Hint:
-      return vscode.DiagnosticSeverity.Hint;
-    default:
-      return vscode.DiagnosticSeverity.Warning;
-  }
 }
 
 /**

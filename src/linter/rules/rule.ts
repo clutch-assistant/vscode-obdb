@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import * as jsonc from 'jsonc-parser';
 
 /**
@@ -62,24 +61,6 @@ export enum LintSeverity {
   Warning = 'warning',
   Information = 'information',
   Hint = 'hint'
-}
-
-/**
- * Maps severity levels to VS Code diagnostic severity
- */
-export function getSeverity(severity: LintSeverity): vscode.DiagnosticSeverity {
-  switch (severity) {
-    case LintSeverity.Error:
-      return vscode.DiagnosticSeverity.Error;
-    case LintSeverity.Warning:
-      return vscode.DiagnosticSeverity.Warning;
-    case LintSeverity.Information:
-      return vscode.DiagnosticSeverity.Information;
-    case LintSeverity.Hint:
-      return vscode.DiagnosticSeverity.Hint;
-    default:
-      return vscode.DiagnosticSeverity.Warning;
-  }
 }
 
 /**

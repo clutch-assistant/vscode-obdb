@@ -11,11 +11,13 @@ import {
 import { getGenerations, GenerationSet } from './utils/generationsCore';
 import { CommandSupportCache } from './caches/commands/commandSupportCache';
 import { calculateDebugFilter } from './utils/debugFilterCalculator';
+import { CliSignalLinter } from './linter/linterCli';
 
 interface CliOptions {
   command: string;
   workspacePath?: string;
   commit?: boolean;
+  json?: boolean;
 }
 
 interface CommandSupportOptions extends CliOptions {
@@ -34,11 +36,14 @@ function parseArgs(): CommandSupportOptions {
   let workspacePath: string | undefined;
   let commandId: string | undefined;
   let commit = false;
+  let json = false;
 
   // Parse remaining arguments
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--commit') {
       commit = true;
+    } else if (args[i] === '--json') {
+      json = true;
     } else if (!workspacePath) {
       workspacePath = args[i];
     } else if (!commandId && command === 'command-support') {
@@ -46,18 +51,20 @@ function parseArgs(): CommandSupportOptions {
     }
   }
 
-  return { command, workspacePath, commandId, commit };
+  return { command, workspacePath, commandId, commit, json };
 }
 
 function printUsage(): void {
   console.log('Usage: obdb <command> <workspace-path> [options]');
   console.log('');
   console.log('Commands:');
+  console.log('  lint <workspace-path>             Lint signalset for issues and warnings');
   console.log('  optimize <workspace-path>         Parse and optimize signalset');
   console.log('  command-support <workspace-path> <command-id>  Show supported and unsupported model years for a command');
   console.log('');
   console.log('Options:');
   console.log('  --commit                          Apply the optimizations to the file');
+  console.log('  --json                            Output results in JSON format (for lint)');
 }
 
 
@@ -311,10 +318,133 @@ async function commandSupportCommand(workspacePath: string, commandId: string): 
   }
 }
 
+async function lintCommand(workspacePath: string, jsonOutput: boolean = false): Promise<void> {
+  if (!fs.existsSync(workspacePath)) {
+    console.error(`Error: Workspace path does not exist: ${workspacePath}`);
+    process.exit(1);
+  }
+
+  const signalsetPath = path.join(workspacePath, 'signalsets', 'v3', 'default.json');
+
+  if (!fs.existsSync(signalsetPath)) {
+    console.error(`Error: Signalset file not found at ${signalsetPath}`);
+    process.exit(1);
+  }
+
+  try {
+    const content = await fs.promises.readFile(signalsetPath, 'utf-8');
+    const rootNode = jsonc.parseTree(content);
+
+    if (!rootNode) {
+      console.error('Error: Failed to parse signalset JSON');
+      process.exit(1);
+    }
+
+    // Create linter instance and run all checks
+    const linter = new CliSignalLinter();
+    const allResults: any[] = [];
+
+    // Lint at document level
+    const documentResults = linter.lintDocument(rootNode);
+    allResults.push(...documentResults);
+
+    // Lint commands and signals
+    const commandsNode = jsonc.findNodeAtLocation(rootNode, ['commands']);
+    if (commandsNode && commandsNode.children) {
+      const commandResults = linter.lintCommands(commandsNode);
+      allResults.push(...commandResults);
+
+      // Lint each command and its signals
+      for (const commandNode of commandsNode.children) {
+        const command = jsonc.getNodeValue(commandNode);
+        const signalsNode = jsonc.findNodeAtLocation(commandNode, ['signals']);
+        
+        const cmdResults = linter.lintCommand(command, commandNode, 
+          signalsNode?.children?.map((signalNode: jsonc.Node) => ({
+            signal: jsonc.getNodeValue(signalNode),
+            node: signalNode
+          })) || []
+        );
+        allResults.push(...cmdResults);
+
+        // Lint each signal
+        if (signalsNode?.children) {
+          for (const signalNode of signalsNode.children) {
+            const signal = jsonc.getNodeValue(signalNode);
+            const signalResults = linter.lintSignal(signal, signalNode);
+            allResults.push(...signalResults);
+          }
+        }
+      }
+    }
+
+    if (jsonOutput) {
+      // Output as JSON
+      console.log(JSON.stringify(allResults, null, 2));
+    } else {
+      // Format and display human-readable output
+      if (allResults.length === 0) {
+        console.log('[bold green]✓ No issues found![/bold green]');
+        return;
+      }
+
+      console.log(`[bold]Linting Results:[/bold] ${signalsetPath}`);
+      console.log(`[dim]Found ${allResults.length} issue(s)[/dim]`);
+      console.log('');
+
+      // Group by severity (infer from ruleId or message patterns)
+      const errors = allResults.filter(r => r.ruleId?.includes('Error') || r.message?.includes('error'));
+      const warnings = allResults.filter(r => r.ruleId?.includes('Warning') || r.message?.includes('warning'));
+      const info = allResults.filter(r => !errors.includes(r) && !warnings.includes(r));
+
+      if (errors.length > 0) {
+        console.log(`[bold red]Errors (${errors.length})[/bold red]`);
+        for (const issue of errors) {
+          console.log(`  [red]✗[/red] ${issue.ruleId}: ${issue.message}`);
+        }
+        console.log('');
+      }
+
+      if (warnings.length > 0) {
+        console.log(`[bold yellow]Warnings (${warnings.length})[/bold yellow]`);
+        for (const issue of warnings) {
+          console.log(`  [yellow]⚠[/yellow] ${issue.ruleId}: ${issue.message}`);
+        }
+        console.log('');
+      }
+
+      if (info.length > 0) {
+        console.log(`[bold cyan]Info (${info.length})[/bold cyan]`);
+        for (const issue of info.slice(0, 10)) {
+          console.log(`  [cyan]ℹ[/cyan] ${issue.ruleId}: ${issue.message}`);
+        }
+        if (info.length > 10) {
+          console.log(`  ... and ${info.length - 10} more`);
+        }
+        console.log('');
+      }
+
+      console.log(`[dim]Total: ${allResults.length} issue(s)[/dim]`);
+    }
+
+  } catch (error) {
+    console.error('Error linting signalset:', error);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs();
 
   switch (options.command) {
+    case 'lint':
+      if (!options.workspacePath) {
+        console.error('Error: workspace-path is required for lint command');
+        printUsage();
+        process.exit(1);
+      }
+      await lintCommand(options.workspacePath, options.json || false);
+      break;
     case 'optimize':
       if (!options.workspacePath) {
         console.error('Error: workspace-path is required for optimize command');

@@ -12,6 +12,7 @@ import { getGenerations, GenerationSet, formatYearsAsRanges } from './utils/gene
 import { CommandSupportCache } from './caches/commands/commandSupportCache';
 import { calculateDebugFilter } from './utils/debugFilterCalculator';
 import { CliSignalLinter } from './linter/linterCli';
+import { SuggestedMetricSuggestionRule } from './linter/rules/suggestedMetricSuggestionRule';
 
 interface CliOptions {
   command: string;
@@ -22,6 +23,7 @@ interface CliOptions {
 
 interface CommandSupportOptions extends CliOptions {
   commandId?: string;
+  signalId?: string;
 }
 
 function parseArgs(): CommandSupportOptions {
@@ -35,6 +37,7 @@ function parseArgs(): CommandSupportOptions {
   const command = args[0];
   let workspacePath: string | undefined;
   let commandId: string | undefined;
+  let signalId: string | undefined;
   let commit = false;
   let json = false;
 
@@ -48,23 +51,26 @@ function parseArgs(): CommandSupportOptions {
       workspacePath = args[i];
     } else if (!commandId && command === 'command-support') {
       commandId = args[i];
+    } else if (!signalId && command === 'suggested-metrics') {
+      signalId = args[i];
     }
   }
 
-  return { command, workspacePath, commandId, commit, json };
+  return { command, workspacePath, commandId, signalId, commit, json };
 }
 
 function printUsage(): void {
   console.log('Usage: obdb <command> <workspace-path> [options]');
   console.log('');
   console.log('Commands:');
-  console.log('  lint <workspace-path>             Lint signalset for issues and warnings');
-  console.log('  optimize <workspace-path>         Parse and optimize signalset');
-  console.log('  command-support <workspace-path> <command-id>  Show supported and unsupported model years for a command');
+  console.log('  lint <workspace-path>                             Lint signalset for issues and warnings');
+  console.log('  optimize <workspace-path>                         Parse and optimize signalset');
+  console.log('  command-support <workspace-path> <command-id>     Show supported and unsupported model years for a command');
+  console.log('  suggested-metrics <workspace-path> [signal-id]    Show suggested metrics for signals (using official vscode-obdb rules)');
   console.log('');
   console.log('Options:');
   console.log('  --commit                          Apply the optimizations to the file');
-  console.log('  --json                            Output results in JSON format (for lint)');
+  console.log('  --json                            Output results in JSON format');
 }
 
 
@@ -441,6 +447,83 @@ async function lintCommand(workspacePath: string, jsonOutput: boolean = false): 
   }
 }
 
+async function suggestedMetricsCommand(workspacePath: string, filterSignalId?: string): Promise<void> {
+  const signalsetPath = path.join(workspacePath, 'signalsets', 'v3', 'default.json');
+
+  if (!fs.existsSync(signalsetPath)) {
+    console.error(`Error: Signalset file not found at ${signalsetPath}`);
+    process.exit(1);
+  }
+
+  try {
+    const content = fs.readFileSync(signalsetPath, 'utf-8');
+    const data = jsonc.parse(content) as any;
+
+    if (!data.commands || !Array.isArray(data.commands)) {
+      console.error('Error: No commands array found in signalset');
+      process.exit(1);
+    }
+
+    // Use the official SuggestedMetricSuggestionRule from vscode-obdb
+    // We use the rule's internal metricPatterns to match signals without needing node objects
+    const rule = new SuggestedMetricSuggestionRule();
+    const results: any[] = [];
+
+    // Iterate through all commands and their signals
+    for (const cmd of data.commands) {
+      if (!cmd.signals || !Array.isArray(cmd.signals)) {
+        continue;
+      }
+
+      for (const signal of cmd.signals) {
+        // Skip if filtering by signal ID and this isn't a match
+        if (filterSignalId && signal.id !== filterSignalId) {
+          continue;
+        }
+
+        // Skip if signal already has a suggestedMetric
+        if (signal.suggestedMetric) {
+          continue;
+        }
+
+        // Use validateSignal but only to extract the message
+        // Create a proper JSONC node structure
+        const dummyNode = {
+          type: 'object' as const,
+          offset: 0,
+          length: 0,
+          parent: undefined,
+          children: []
+        };
+
+        const lintResult = rule.validateSignal(signal, dummyNode);
+        if (lintResult) {
+          // Extract the metric name and description from the message
+          // Message format: "Consider adding suggestedMetric: "metricName" (description)"
+          const metricMatch = lintResult.message.match(/suggestedMetric:\s*"([^"]+)"/);
+          const descMatch = lintResult.message.match(/\(([^)]+)\)$/);
+          
+          if (metricMatch && descMatch) {
+            results.push({
+              signalId: signal.id,
+              signalName: signal.name,
+              suggestedMetric: metricMatch[1],
+              description: descMatch[1]
+            });
+          }
+        }
+      }
+    }
+
+    // Output as JSON
+    console.log(JSON.stringify(results, null, 2));
+
+  } catch (error) {
+    console.error('Error analyzing signalset:', error);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs();
 
@@ -473,6 +556,14 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       await commandSupportCommand(options.workspacePath, options.commandId, options.json || false);
+      break;
+    case 'suggested-metrics':
+      if (!options.workspacePath) {
+        console.error('Error: workspace-path is required for suggested-metrics');
+        printUsage();
+        process.exit(1);
+      }
+      await suggestedMetricsCommand(options.workspacePath, options.signalId);
       break;
     default:
       console.error(`Error: Unknown command '${options.command}'`);
